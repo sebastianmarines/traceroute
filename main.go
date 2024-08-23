@@ -14,18 +14,27 @@ func main() {
 
 	args := os.Args
 	if len(args) != 2 {
-		fmt.Println("Usage: go run main.go <ip>")
+		fmt.Println("Usage: go run main.go <dest>")
 		os.Exit(1)
 	}
+
+	host := ""
 
 	// Parse the IP address
 	ip := net.ParseIP(args[1])
 	if ip == nil {
-		fmt.Println("Invalid IP address")
-		os.Exit(1)
+		// Try to resolve the IP address
+		ip = getIp(args[1])
+		if ip == nil {
+			fmt.Println("Could not resolve the IP address")
+			os.Exit(1)
+		}
+		host = os.Args[1]
 	}
 
-	host := getHost(ip)
+	if host == "" {
+		host = getHost(ip)
+	}
 
 	maxHops := 64
 
@@ -142,4 +151,20 @@ func printErrorResponse(j int) {
 	if j == 2 {
 		fmt.Println()
 	}
+}
+
+func getIp(host string) net.IP {
+	ips, err := net.LookupIP(host)
+	if err != nil {
+		fmt.Println(err)
+		os.Exit(1)
+	}
+
+	for _, ip := range ips {
+		if ip.To4() != nil {
+			return ip
+		}
+	}
+
+	return nil
 }
