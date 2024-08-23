@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"net"
+	"os"
 	"time"
 
 	"golang.org/x/net/icmp"
@@ -11,7 +12,22 @@ import (
 
 func main() {
 
-	ip := net.ParseIP("1.1.1.1")
+	args := os.Args
+	if len(args) != 2 {
+		fmt.Println("Usage: go run main.go <ip>")
+		os.Exit(1)
+	}
+
+	// Parse the IP address
+	ip := net.ParseIP(args[1])
+	if ip == nil {
+		fmt.Println("Invalid IP address")
+		os.Exit(1)
+	}
+
+	host := getHost(ip)
+
+	maxHops := 64
 
 	packetconn, err := icmp.ListenPacket("ip4:icmp", "0.0.0.0")
 	if err != nil {
@@ -20,65 +36,110 @@ func main() {
 
 	defer packetconn.Close()
 
-	// Send 64 messages
-	for i := 0; i < 64; i++ {
-		message := &icmp.Message{
-			Type: ipv4.ICMPTypeEcho,
-			Code: 0,
-			Body: &icmp.Echo{
-				ID:   1,
-				Seq:  i + 1,
-				Data: []byte("Hello World"),
-			},
+	fmt.Printf("Traceroute to %s (%s), %d hops max\n", host, ip.String(), maxHops)
+
+	for i := 0; i < maxHops; i++ {
+		fmt.Printf("%2d ", i+1)
+
+		lastAddress := ""
+
+		for j := 0; j < 3; j++ {
+			message := &icmp.Message{
+				Type: ipv4.ICMPTypeEcho,
+				Code: 0,
+				Body: &icmp.Echo{
+					ID:   1,
+					Seq:  i + 1,
+					Data: []byte("Hello World"),
+				},
+			}
+			messageBytes, err := message.Marshal(nil)
+			if err != nil {
+				panic(err)
+			}
+
+			if err := packetconn.IPv4PacketConn().SetTTL(i + 1); err != nil {
+				panic(err)
+			}
+
+			if err := packetconn.IPv4PacketConn().SetDeadline(time.Now().Add(2 * time.Second)); err != nil {
+				panic(err)
+			}
+
+			start := time.Now()
+
+			if _, err := packetconn.WriteTo(messageBytes, &net.IPAddr{IP: ip}); err != nil {
+				panic(err)
+			}
+
+			buffer := make([]byte, 1500)
+			n, addr, err := packetconn.ReadFrom(buffer)
+
+			if err != nil {
+				printErrorResponse(j)
+				continue
+			}
+
+			elapsed := time.Since(start)
+
+			message, err = icmp.ParseMessage(1, buffer[:n])
+
+			if err != nil {
+				panic(err)
+			}
+
+			host := getHost(addr.(*net.IPAddr).IP)
+
+			switch message.Type {
+			case ipv4.ICMPTypeEchoReply:
+				printResponse(&lastAddress, host, addr.String(), elapsed, j)
+				// Break the loop
+				i = 64
+			case ipv4.ICMPTypeTimeExceeded:
+				printResponse(&lastAddress, host, addr.String(), elapsed, j)
+			default:
+				printErrorResponse(j)
+			}
+
 		}
-		messageBytes, err := message.Marshal(nil)
-		if err != nil {
-			panic(err)
-		}
+	}
+}
 
-		if err := packetconn.IPv4PacketConn().SetTTL(i + 1); err != nil {
-			panic(err)
-		}
+func getHost(ip net.IP) string {
+	addrs, err := net.LookupAddr(ip.String())
 
-		if err := packetconn.IPv4PacketConn().SetDeadline(time.Now().Add(2 * time.Second)); err != nil {
-			panic(err)
-		}
+	if err != nil {
+		return ip.String()
+	}
 
-		start := time.Now()
+	if len(addrs) > 0 {
+		return addrs[0]
+	}
 
-		if _, err := packetconn.WriteTo(messageBytes, &net.IPAddr{IP: ip}); err != nil {
-			panic(err)
-		}
+	return ip.String()
+}
 
-		buffer := make([]byte, 1500)
-		n, addr, err := packetconn.ReadFrom(buffer)
+func printResponse(lastAddress *string, host string, addr string, elapsed time.Duration, j int) {
+	if *lastAddress == "" {
+		fmt.Printf("%s (%s) ", host, addr)
+		*lastAddress = addr
+	}
 
-		if err != nil {
-			fmt.Printf("Error reading response: %v\n", err)
-			continue
-		}
+	if *lastAddress != addr {
+		fmt.Printf("\n   %s (%s) ", host, addr)
+		*lastAddress = addr
+	}
 
-		elapsed := time.Since(start)
+	fmt.Printf("%s ", elapsed)
 
-		message, err = icmp.ParseMessage(1, buffer[:n])
+	if j == 2 {
+		fmt.Println()
+	}
+}
 
-		if err != nil {
-			panic(err)
-		}
-
-		switch message.Type {
-		case ipv4.ICMPTypeEchoReply:
-			echoReply := message.Body.(*icmp.Echo)
-			fmt.Printf("Echo reply from %s with ID %d and Seq %d, time elapsed: %v\n", addr.String(), echoReply.ID, echoReply.Seq, elapsed)
-			// Break the loop
-			i = 64
-		case ipv4.ICMPTypeTimeExceeded:
-			fmt.Printf("Time exceeded from %s, time elapsed: %v\n", addr.String(), elapsed)
-		case ipv4.ICMPTypeDestinationUnreachable:
-			fmt.Printf("Destination unreachable from %s, time elapsed: %v\n", addr.String(), elapsed)
-		default:
-			fmt.Printf("Unknown message type: %v\n", message.Type)
-		}
-
+func printErrorResponse(j int) {
+	fmt.Printf("* ")
+	if j == 2 {
+		fmt.Println()
 	}
 }
